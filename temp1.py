@@ -432,15 +432,47 @@ def main():
 
     @v.bind_key("Control-Shift-S")
     def _save_all(_):
+        """
+        Saves all annotations for all annotated frames. Creates perfect image/mask pairs.
+        """
+        # Get a clean list of unique, valid frame numbers that have annotations
+        if 't' not in shapes.features.columns or shapes.features['t'].isna().all():
+            print("No annotations with frame data to save.")
+            return
         frames = sorted([int(t) for t in shapes.features["t"].dropna().unique()])
-        for t in frames:
-            save_roizip_for_frame(os.path.join(args.out, f"rois_t{t:04d}.zip"),
-                                  shapes, t, stroke_color=(255,255,0), stroke_width=1.4)
-            # --- AFTER ---
-            imwrite(os.path.join(mask_dir, f"mask_t{t:04d}.tif"),
-                    mask_for_frame(H, W, shapes, t), dtype=np.uint16)
-        print("✅ saved frames:", frames if frames else "none")
 
+        if not frames:
+            print("No valid frames found to save.")
+            return
+
+        # Create the dedicated output folders for images and masks
+        image_slices_dir = os.path.join(args.out, "images")
+        mask_slices_dir = os.path.join(args.out, "masks")
+        os.makedirs(image_slices_dir, exist_ok=True)
+        os.makedirs(mask_slices_dir, exist_ok=True)
+
+        for t in frames:
+            # 1. Save the ROI Zip file
+            save_roizip_for_frame(os.path.join(args.out, f"rois_t{t:04d}.zip"),
+                                  shapes, t, stroke_color=(255, 255, 0), stroke_width=1.4)
+
+            # 2. Generate and save the mask file
+            mask = mask_for_frame(H, W, shapes, t)
+            imwrite(os.path.join(mask_slices_dir, f"mask_t{t:04d}.tif"),
+                    mask, dtype=np.uint16)
+
+            # 3. Save the corresponding raw image frame
+            image_frame = stack[t]
+            # If using dask, compute the frame to get a numpy array
+            if hasattr(image_frame, 'compute'):
+                image_frame = image_frame.compute()
+            
+            imwrite(os.path.join(image_slices_dir, f"image_t{t:04d}.tif"),
+                    image_frame)
+
+        print(f"✅ Saved data for {len(frames)} frames to '{args.out}' folder.")
+
+        
     @v.bind_key("l")
     def _toggle_labels(_):
         try:
