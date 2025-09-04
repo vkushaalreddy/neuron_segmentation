@@ -2,47 +2,72 @@
 import torch
 import numpy as np
 import tifffile
+import cv2
 import argparse
+import os
 from unet_model import UNet
 
-def predict(model_path, input_path, output_path, device):
-    print("Loading model...")
-    # NOTE: Make sure n_classes matches what you used in train.py
-    n_classes = 51 
-    model = UNet(n_channels=1, n_classes=n_classes)
-    model.to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval() # Set the model to evaluation mode
+def predict(model, image_path, device):
+    """Runs a single image through the model and returns the prediction."""
+    # 1. Load and pre-process the image
+    image = tifffile.imread(image_path).astype(np.float32)
+    image = image / np.max(image) if np.max(image) > 0 else image
+    image = np.expand_dims(image, axis=(0, 1))
+    image_tensor = torch.from_numpy(image).to(device)
 
-    print(f"Loading input image: {input_path}")
-    # Load the single input image
-    image = tifffile.imread(input_path)
-    
-    # Pre-process the image (same as in the Dataset class)
-    image_for_model = image.astype(np.float32) / (np.max(image) + 1e-8)
-    image_for_model = np.expand_dims(image_for_model, axis=0) # Add channel dimension
-    image_for_model = np.expand_dims(image_for_model, axis=0) # Add batch dimension
-    
-    image_tensor = torch.from_numpy(image_for_model).to(device).float()
-
-    print("Running prediction...")
-    with torch.no_grad(): # Disable gradient calculation for inference
+    # 2. Run the model
+    model.eval()
+    with torch.no_grad():
         output = model(image_tensor)
-    
-    # Post-process the output
-    # The output is (B, C, H, W). We take the argmax along the class dimension C.
-    predicted_mask = torch.argmax(output, dim=1).squeeze(0).cpu().numpy()
-    
-    print(f"Saving predicted mask to: {output_path}")
-    tifffile.imwrite(output_path, predicted_mask.astype(np.uint16))
-    print("Prediction finished.")
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Predict neuron masks using a trained U-Net model.')
-    parser.add_argument('--model', type=str, required=True, help='Path to the trained model (.pth file)')
-    parser.add_argument('--input', type=str, required=True, help='Path to the input image (.tif file)')
-    parser.add_argument('--output', type=str, default='prediction.tif', help='Path to save the output mask')
+    # 3. Post-process the output
+    prediction = torch.argmax(output, dim=1).squeeze(0)
+    prediction_np = prediction.cpu().numpy().astype(np.uint8)
+    
+    return prediction_np
+
+def main():
+    parser = argparse.ArgumentParser(description="Predict neuron masks from an image.")
+    parser.add_argument('--model', type=str, required=True, help="Path to the trained .pth model file.")
+    parser.add_argument('--input', type=str, required=True, help="Path to the input .tif image.")
+    parser.add_argument('--output', type=str, default='predictions', help="Folder to save the output images.")
     args = parser.parse_args()
 
+    os.makedirs(args.output, exist_ok=True)
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    predict(args.model, args.input, args.output, device)
+    
+    # NOTE: Ensure NUM_CLASSES matches what you used in train.py
+    NUM_CLASSES = 51 
+    model = UNet(n_channels=1, n_classes=NUM_CLASSES)
+    model.load_state_dict(torch.load(args.model, map_location=device))
+    model.to(device)
+    
+    print(f"Model loaded. Predicting on {args.input}...")
+    
+    predicted_mask = predict(model, args.input, device)
+
+    # --- VISUALIZATION STEP: FROM MASK TO CIRCLES ---
+    original_image_8bit = tifffile.imread(args.input)
+    original_image_8bit = (original_image_8bit / np.max(original_image_8bit) * 255).astype(np.uint8)
+    output_visual = cv2.cvtColor(original_image_8bit, cv2.COLOR_GRAY2BGR)
+
+    contours, _ = cv2.findContours(predicted_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    for c in contours:
+        M = cv2.moments(c)
+        if M["m00"] != 0:
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+            cv2.circle(output_visual, (cX, cY), 5, (0, 255, 0), 1) 
+
+    output_filename = os.path.join(args.output, os.path.basename(args.input).replace('.tif', '_prediction_circles.png'))
+    cv2.imwrite(output_filename, output_visual)
+
+    print(f"Prediction complete. Visualization with circles saved to {output_filename}")
+
+
+# --- THIS IS THE CRUCIAL ENTRY POINT BLOCK ---
+# It must be at the end of the file and not indented.
+if __name__ == '__main__':
+    main()
