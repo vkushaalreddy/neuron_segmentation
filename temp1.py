@@ -432,45 +432,45 @@ def main():
 
     @v.bind_key("Control-Shift-S")
     def _save_all(_):
-        """
-        Saves all annotations for all annotated frames. Creates perfect image/mask pairs.
-        """
-        # Get a clean list of unique, valid frame numbers that have annotations
-        if 't' not in shapes.features.columns or shapes.features['t'].isna().all():
-            print("No annotations with frame data to save.")
+        if len(shapes.features) == 0 or "t" not in shapes.features or shapes.features["t"].isna().all():
+            print("No annotations to save.")
             return
-        frames = sorted([int(t) for t in shapes.features["t"].dropna().unique()])
+        
+        frames_to_save = sorted(set(int(t) for t in shapes.features["t"].dropna()))
+        print(f"Found annotations on {len(frames_to_save)} frames. Saving now...")
 
-        if not frames:
-            print("No valid frames found to save.")
-            return
+        image_dir = os.path.join(args.out, "images")
+        mask_dir = os.path.join(args.out, "masks")
+        os.makedirs(image_dir, exist_ok=True)
+        os.makedirs(mask_dir, exist_ok=True)
 
-        # Create the dedicated output folders for images and masks
-        image_slices_dir = os.path.join(args.out, "images")
-        mask_slices_dir = os.path.join(args.out, "masks")
-        os.makedirs(image_slices_dir, exist_ok=True)
-        os.makedirs(mask_slices_dir, exist_ok=True)
+        # --- NEW: Scan directory to find the highest existing number ---
+        existing_indices = []
+        for f in os.listdir(image_dir):
+            if f.startswith('image_') and f.endswith('.tif'):
+                try:
+                    num = int(f.replace('image_', '').replace('.tif', ''))
+                    existing_indices.append(num)
+                except ValueError:
+                    continue
+        start_num = max(existing_indices) + 1 if existing_indices else 1
+        print(f"Starting file numbering at {start_num:04d}...")
+        # --- END NEW ---
 
-        for t in frames:
-            # 1. Save the ROI Zip file
-            save_roizip_for_frame(os.path.join(args.out, f"rois_t{t:04d}.zip"),
-                                  shapes, t, stroke_color=(255, 255, 0), stroke_width=1.4)
-
-            # 2. Generate and save the mask file
-            mask = mask_for_frame(H, W, shapes, t)
-            imwrite(os.path.join(mask_slices_dir, f"mask_t{t:04d}.tif"),
-                    mask, dtype=np.uint16)
-
-            # 3. Save the corresponding raw image frame
-            image_frame = stack[t]
-            # If using dask, compute the frame to get a numpy array
-            if hasattr(image_frame, 'compute'):
-                image_frame = image_frame.compute()
+        for i, t in enumerate(frames_to_save):
+            current_num = start_num + i
             
-            imwrite(os.path.join(image_slices_dir, f"image_t{t:04d}.tif"),
-                    image_frame)
-
-        print(f"✅ Saved data for {len(frames)} frames to '{args.out}' folder.")
+            mask_path = os.path.join(mask_dir, f"mask_{current_num:04d}.tif")
+            image_path = os.path.join(image_dir, f"image_{current_num:04d}.tif")
+            
+            mask = mask_for_frame(H, W, shapes, t)
+            imwrite(mask_path, mask, dtype=np.uint16)
+            
+            image_frame = stack[t]
+            if hasattr(image_frame, 'compute'): image_frame = image_frame.compute()
+            imwrite(image_path, image_frame)
+            
+        print(f"✅ Saved data for {len(frames_to_save)} frames to '{args.out}' folder.")
 
         
     @v.bind_key("l")
@@ -517,3 +517,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
