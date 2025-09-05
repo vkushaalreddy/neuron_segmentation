@@ -1,4 +1,4 @@
-# predict.py
+# predict.py (Upgraded for Video Stacks)
 import torch
 import numpy as np
 import tifffile
@@ -6,30 +6,32 @@ import cv2
 import argparse
 import os
 from unet_model import UNet
+from tqdm import tqdm
 
-def predict(model, image_path, device):
-    """Runs a single image through the model and returns the prediction."""
-    # 1. Load and pre-process the image
-    image = tifffile.imread(image_path).astype(np.float32)
-    image = image / np.max(image) if np.max(image) > 0 else image
-    image = np.expand_dims(image, axis=(0, 1))
+def predict(model, image_array, device):
+    """Runs a single image numpy array through the model and returns the prediction."""
+    # Pre-process the single frame
+    image = image_array.astype(np.float32)
+    max_val = np.max(image)
+    if max_val > 0:
+        image = image / max_val
+    
+    image = np.expand_dims(image, axis=(0, 1)) # (H, W) -> (1, 1, H, W)
     image_tensor = torch.from_numpy(image).to(device)
 
-    # 2. Run the model
     model.eval()
     with torch.no_grad():
         output = model(image_tensor)
 
-    # 3. Post-process the output
     prediction = torch.argmax(output, dim=1).squeeze(0)
     prediction_np = prediction.cpu().numpy().astype(np.uint8)
     
     return prediction_np
 
 def main():
-    parser = argparse.ArgumentParser(description="Predict neuron masks from an image.")
+    parser = argparse.ArgumentParser(description="Predict neuron masks from an image or video stack.")
     parser.add_argument('--model', type=str, required=True, help="Path to the trained .pth model file.")
-    parser.add_argument('--input', type=str, required=True, help="Path to the input .tif image.")
+    parser.add_argument('--input', type=str, required=True, help="Path to the input .tif image or video stack.")
     parser.add_argument('--output', type=str, default='predictions', help="Folder to save the output images.")
     args = parser.parse_args()
 
@@ -37,7 +39,6 @@ def main():
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # NOTE: Ensure NUM_CLASSES matches what you used in train.py
     NUM_CLASSES = 51 
     model = UNet(n_channels=1, n_classes=NUM_CLASSES)
     model.load_state_dict(torch.load(args.model, map_location=device))
@@ -45,29 +46,44 @@ def main():
     
     print(f"Model loaded. Predicting on {args.input}...")
     
-    predicted_mask = predict(model, args.input, device)
+    # Load the entire image/stack
+    video_stack = tifffile.imread(args.input)
+    
+    # If it's a single 2D image, add a dimension to make it a 1-frame stack
+    if video_stack.ndim == 2:
+        video_stack = np.expand_dims(video_stack, axis=0)
 
-    # --- VISUALIZATION STEP: FROM MASK TO CIRCLES ---
-    original_image_8bit = tifffile.imread(args.input)
-    original_image_8bit = (original_image_8bit / np.max(original_image_8bit) * 255).astype(np.uint8)
-    output_visual = cv2.cvtColor(original_image_8bit, cv2.COLOR_GRAY2BGR)
+    # Get the base name for output files
+    base_name = os.path.splitext(os.path.basename(args.input))[0]
 
-    contours, _ = cv2.findContours(predicted_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Loop through each frame in the stack
+    for i, frame in enumerate(tqdm(video_stack, desc="Processing frames")):
+        # Get the prediction for the current frame
+        predicted_mask = predict(model, frame, device)
 
-    for c in contours:
-        M = cv2.moments(c)
-        if M["m00"] != 0:
-            cX = int(M["m10"] / M["m00"])
-            cY = int(M["m01"] / M["m00"])
-            cv2.circle(output_visual, (cX, cY), 5, (0, 255, 0), 1) 
+        # --- VISUALIZATION STEP ---
+        max_val_orig = np.max(frame)
+        if max_val_orig > 0:
+            original_image_8bit = (frame / max_val_orig * 255).astype(np.uint8)
+        else:
+            original_image_8bit = frame.astype(np.uint8)
+            
+        output_visual = cv2.cvtColor(original_image_8bit, cv2.COLOR_GRAY2BGR)
 
-    output_filename = os.path.join(args.output, os.path.basename(args.input).replace('.tif', '_prediction_circles.png'))
-    cv2.imwrite(output_filename, output_visual)
+        contours, _ = cv2.findContours(predicted_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    print(f"Prediction complete. Visualization with circles saved to {output_filename}")
+        for c in contours:
+            M = cv2.moments(c)
+            if M["m00"] != 0:
+                cX = int(M["m10"] / M["m00"])
+                cY = int(M["m01"] / M["m00"])
+                cv2.circle(output_visual, (cX, cY), 5, (0, 255, 0), 1) 
+
+        output_filename = os.path.join(args.output, f"{base_name}_prediction_frame_{i:04d}.png")
+        cv2.imwrite(output_filename, output_visual)
+
+    print(f"\nPrediction complete for all {len(video_stack)} frames. Visualizations saved to '{args.output}' folder.")
 
 
-# --- THIS IS THE CRUCIAL ENTRY POINT BLOCK ---
-# It must be at the end of the file and not indented.
 if __name__ == '__main__':
     main()
